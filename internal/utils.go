@@ -14,28 +14,14 @@ import (
 )
 
 const (
-	// maxRecursionDepth prevents stack overflows by limiting directory traversal depth
-	maxRecursionDepth = 100
-	// initialBufferSize sets a 4KB initial allocation for strings.Builder
-	initialBufferSize = 4096
-	// recursionTimeout sets the maximum duration for recursive file operations
-	recursionTimeout = 30 * time.Second
+	maxRecursionDepth = 100              // Limits directory traversal depth to prevent stack overflows
+	initialBufferSize = 4096             // 4KB initial allocation for strings.Builder
+	recursionTimeout  = 30 * time.Second // Maximum duration for recursive file operations
 )
 
 // FileFromPath reads a single file and returns its contents as a string
-// with the filename as a header.
-//
-// If the path doesn't exist or points to a directory, an error message
-// is returned as a string. The returned string format is:
-//
-//	// filename.ext
-//	<file contents>
-//
-// Parameters:
-//   - filePath: the full path to the file to be read
-//
-// Returns:
-//   - a string containing the file contents with header, or an error message
+// with the filename as a header. If the path doesn't exist or points to a directory,
+// an error message is returned as a string.
 func FileFromPath(filePath string) string {
 	fileInfo, err := os.Stat(filePath)
 	if err != nil {
@@ -52,7 +38,8 @@ func FileFromPath(filePath string) string {
 	}
 
 	var result strings.Builder
-	WriteFileToBuilder(&result, string(content), filePath, fileInfo.Size())
+	result.Grow(len(content) + len(filePath) + 5)
+	WriteFileToBuilder(&result, string(content), filePath)
 
 	return result.String()
 }
@@ -61,16 +48,8 @@ func FileFromPath(filePath string) string {
 // as a single formatted string. It handles both single files and directories.
 //
 // For directories, it recursively traverses subdirectories (up to maxRecursionDepth)
-// and combines all file contents with appropriate headers.
-//
-// Parameters:
-//   - sourcePath: path to a file or directory
-//   - ignoreSourceFileOpt: optional boolean flag; if true and sourcePath are a file,
-//     that file will be excluded from directory contents. When sourcePath is a
-//     specific file and ignoreSourceFile is true, returns "No files found".
-//
-// Returns:
-//   - a string containing all file contents with headers, or an error message
+// and combines all file contents with appropriate headers. If ignoreSourceFileOpt
+// is true and sourcePath is a file, that file will be excluded from directory contents.
 func FilesFromPath(sourcePath string, ignoreSourceFileOpt ...bool) string {
 	ignoreSourceFile := false
 	if len(ignoreSourceFileOpt) > 0 {
@@ -88,21 +67,8 @@ func FilesFromPath(sourcePath string, ignoreSourceFileOpt ...bool) string {
 }
 
 // filesFromPathWithDepth is an internal recursive helper function that processes
-// files at the given path with tracking for recursion depth.
-//
-// It checks for context timeout, respects maximum recursion depth, and handles
-// both directories and files by either recursing into subdirectories or reading
-// and formatting file contents.
-//
-// Parameters:
-//   - ctx: context for cancellation and timeout control
-//   - sourcePath: path to process (file or directory)
-//   - ignoreSourceFile: if true, skips the original source file
-//   - depth: current recursion depth to track and limit traversal
-//
-// Returns:
-//   - a string containing all processed file contents
-//   - error if any occurred during processing
+// files at the given path with tracking for recursion depth. It checks for context
+// timeout, respects maximum recursion depth, and handles both directories and files.
 func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSourceFile bool, depth int) (string, error) {
 	select {
 	case <-ctx.Done():
@@ -113,9 +79,6 @@ func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSource
 	if depth > maxRecursionDepth {
 		return "", fmt.Errorf("maximum recursion depth reached at: %s", sourcePath)
 	}
-
-	allInfo := strings.Builder{}
-	allInfo.Grow(initialBufferSize)
 
 	fileInfo, err := os.Stat(sourcePath)
 	if err != nil {
@@ -141,6 +104,8 @@ func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSource
 		return "No files found", nil
 	}
 
+	allInfo := strings.Builder{}
+	allInfo.Grow(initialBufferSize)
 	filesProcessed := 0
 
 	for _, fileEntry := range files {
@@ -156,20 +121,13 @@ func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSource
 		if fileEntry.IsDir() {
 			subDirContents, err := filesFromPathWithDepth(ctx, filePath, ignoreSourceFile, depth+1)
 			if err != nil {
-				allInfo.WriteString("\n// Error processing directory ")
-				allInfo.WriteString(currentFileName)
-				allInfo.WriteString(": ")
-				allInfo.WriteString(err.Error())
-				allInfo.WriteString("\n")
+				fmt.Fprintf(&allInfo, "\n// Error processing directory %s: %s\n",
+					currentFileName, err.Error())
 				continue
 			}
 
-			if subDirContents != "No files found" &&
-				subDirContents != "No file contents found" {
-				allInfo.WriteString("\n// Directory: ")
-				allInfo.WriteString(currentFileName)
-				allInfo.WriteString("\n")
-				allInfo.WriteString(subDirContents)
+			if subDirContents != "No files found" && subDirContents != "No file contents found" {
+				fmt.Fprintf(&allInfo, "\n// Directory: %s\n%s", currentFileName, subDirContents)
 				filesProcessed++
 			}
 			continue
@@ -180,8 +138,8 @@ func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSource
 		}
 
 		fileContent := FileFromPath(filePath)
-		tempInfo, _ := os.Stat(filePath)
-		WriteFileToBuilder(&allInfo, fileContent, filePath, tempInfo.Size())
+		allInfo.WriteString(fileContent)
+		allInfo.WriteString("\n")
 		filesProcessed++
 	}
 
@@ -192,22 +150,22 @@ func filesFromPathWithDepth(ctx context.Context, sourcePath string, ignoreSource
 	return allInfo.String(), nil
 }
 
-func WriteFileToBuilder(builder *strings.Builder, fileContent string, fileName string, fileSize int64) {
-	headerSize := len(fileName) + 4
-
-	builder.Grow(int(fileSize) + headerSize)
+// WriteFileToBuilder writes file content with a header to the provided strings.Builder.
+func WriteFileToBuilder(builder *strings.Builder, fileContent string, fileName string) {
 	if strings.HasPrefix(fileContent, "Error:") || strings.HasPrefix(fileContent, "Error reading file") {
-
 		return
 	}
+
+	builder.WriteString("// ")
+	builder.WriteString(fileName)
 	builder.WriteString("\n")
-	builder.WriteString("// " + fileName + "\n")
 	builder.WriteString(fileContent)
 	builder.WriteString("\n")
-
 }
 
-// ExtractImportsContent extracts and retrieves content from all relative imports in a TSX test file
+// ExtractImportsContent extracts and retrieves content from all relative imports
+// in a TSX test file. It parses import statements, resolves relative paths, and
+// returns the content of all imported files combined.
 func ExtractImportsContent(filePath string) (string, error) {
 	content, err := os.ReadFile(filePath)
 	if err != nil {
@@ -215,7 +173,6 @@ func ExtractImportsContent(filePath string) (string, error) {
 	}
 
 	baseDir := filepath.Dir(filePath)
-
 	importRegex := regexp.MustCompile(`import\s+(?:.*\s+from\s+)?['"](\.[^'"]+)['"]`)
 	matches := importRegex.FindAllSubmatch(content, -1)
 
@@ -228,34 +185,41 @@ func ExtractImportsContent(filePath string) (string, error) {
 		}
 
 		relativePath := string(match[1])
-
-		// Handle imports that don't specify file extension
 		fullPath := filepath.Join(baseDir, relativePath)
-		if !strings.HasSuffix(relativePath, ".tsx") && !strings.HasSuffix(relativePath, ".ts") {
-			// Try common extensions
-			for _, ext := range []string{".tsx", ".ts", ".js", ".jsx"} {
-				if _, err := os.Stat(fullPath + ext); err == nil {
-					fullPath = fullPath + ext
-					break
-				}
 
-				// Check for index files in directories
-				indexPath := filepath.Join(fullPath, "index"+ext)
-				if _, err := os.Stat(indexPath); err == nil {
-					fullPath = indexPath
-					break
-				}
-			}
+		if !strings.HasSuffix(relativePath, ".tsx") && !strings.HasSuffix(relativePath, ".ts") {
+			fullPath = resolveImportPath(fullPath)
 		}
 
-		// Read the file content
+		if fullPath == "" {
+			continue
+		}
+
 		fileContent, err := os.ReadFile(fullPath)
 		if err != nil {
 			continue
 		}
-		tempInfo, _ := os.Stat(fullPath)
-		WriteFileToBuilder(&importContents, string(fileContent), fullPath, tempInfo.Size())
+
+		importContents.Grow(len(fileContent) + len(filePath) + 5)
+		WriteFileToBuilder(&importContents, string(fileContent), fullPath)
 	}
 
 	return importContents.String(), nil
+}
+
+// resolveImportPath attempts to resolve an import path by trying common file extensions
+// and checking for index files in directories. Returns an empty string if resolution fails.
+func resolveImportPath(basePath string) string {
+	for _, ext := range []string{".tsx", ".ts", ".js", ".jsx"} {
+		if _, err := os.Stat(basePath + ext); err == nil {
+			return basePath + ext
+		}
+
+		indexPath := filepath.Join(basePath, "index"+ext)
+		if _, err := os.Stat(indexPath); err == nil {
+			return indexPath
+		}
+	}
+
+	return ""
 }
